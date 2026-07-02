@@ -59,7 +59,7 @@ def _():
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
 
-    return PCA, go, make_subplots, np, platform, stats, torch
+    return PCA, go, make_subplots, np, stats, torch
 
 
 @app.cell
@@ -123,13 +123,13 @@ def _(mo, torch):
 
 
 @app.cell
-def _(mo, np, platform, stats, torch):
+def _(mo, np, stats, torch):
     from tabicl.prior.dataset import PriorDataset
 
-    # Parallel generation everywhere except macOS, where process-based joblib
-    # (n_jobs=-1) segfaults once torch is loaded. On Linux (e.g. the GPU server)
-    # this uses all cores and is far faster.
-    gen_n_jobs = 1 if platform.system() == "Darwin" else -1
+    # GPU generation is ~5x faster here (benchmarked); joblib parallelism is actually
+    # slower for these small per-dataset SCMs, so n_jobs=1. PriorDataset supports
+    # only cpu/cuda (not mps), so pick cuda when available else cpu.
+    gen_device = "cuda" if torch.cuda.is_available() else "cpu"
 
     def generate_synthetic_columns(n_columns, seq_len, seed):
         """Pool raw columns from the SCM prior (mix_scm) until we have n_columns."""
@@ -144,8 +144,8 @@ def _(mo, np, platform, stats, torch):
             min_seq_len=None,
             max_seq_len=seq_len,
             prior_type="mix_scm",
-            n_jobs=gen_n_jobs,
-            device="cpu",
+            n_jobs=1,
+            device=gen_device,
         )
         cols, skew, kurt = [], [], []
         with mo.status.progress_bar(
@@ -156,7 +156,7 @@ def _(mo, np, platform, stats, torch):
                 X, _y, d, _sl, _ts = prior.get_batch()
                 for i in range(X.shape[0]):
                     di = int(d[i])
-                    Xi = X[i, :, :di].float().numpy()  # (T, di)
+                    Xi = X[i, :, :di].float().cpu().numpy()  # (T, di); .cpu() for cuda tensors
                     for j in range(di):
                         c = Xi[:, j]
                         if not np.all(np.isfinite(c)) or np.std(c) < 1e-8:
@@ -167,6 +167,7 @@ def _(mo, np, platform, stats, torch):
                 bar.update(increment=min(len(cols), n_columns) - prev)
         columns = torch.tensor(np.stack(cols[:n_columns]), dtype=torch.float32)
         return columns, np.array(skew[:n_columns]), np.array(kurt[:n_columns])
+
 
     return (generate_synthetic_columns,)
 
@@ -219,15 +220,6 @@ def _(
 
 
 @app.cell
-def _(mo):
-    color_dropdown = mo.ui.dropdown(
-        {"skewness": "skewness", "kurtosis": "kurtosis"}, value="skewness", label="color by"
-    )
-    color_dropdown
-    return (color_dropdown,)
-
-
-@app.cell
 def _(go, np):
     def scatter_figure(coords, color_vals, label, cmin, cmax):
         idx = np.arange(len(coords))
@@ -262,13 +254,12 @@ def _(go, np):
 
 
 @app.cell
-def _(color_dropdown, mo, scatter_figure, syn_coords, syn_kurt, syn_skew):
-    if color_dropdown.value == "skewness":
-        syn_fig = scatter_figure(syn_coords, syn_skew, "skewness", -1.5, 1.5)
-    else:
-        syn_fig = scatter_figure(syn_coords, syn_kurt, "kurtosis", 0.0, 5.0)
-    syn_plot = mo.ui.plotly(syn_fig)
-    syn_plot
+def _(mo, scatter_figure, syn_coords, syn_kurt, syn_skew):
+    syn_fig_skew = scatter_figure(syn_coords, syn_skew, "skewness", -1.5, 1.5)
+    syn_fig_kurt = scatter_figure(syn_coords, syn_kurt, "kurtosis", 0.0, 5.0)
+    syn_plot = mo.ui.plotly(syn_fig_skew)
+    syn_plot_kurt = mo.ui.plotly(syn_fig_kurt)
+    mo.hstack([syn_plot, syn_plot_kurt], widths="equal", gap=1)
     return (syn_plot,)
 
 
@@ -335,24 +326,6 @@ def _(mo):
 
 
 @app.cell
-def _(mo):
-    # A few small, mostly-numeric TabArena-v0.1 classification datasets (OpenML task ids).
-    tabarena_tasks = {
-        "credit-g (363626)": 363626,
-        "diabetes (363629)": 363629,
-        "blood-transfusion (363621)": 363621,
-        "churn (363623)": 363623,
-        "Bank_Customer_Churn (363619)": 363619,
-    }
-    tabarena_select = mo.ui.multiselect(
-        options=tabarena_tasks, value=["diabetes (363629)", "credit-g (363626)"], label="TabArena datasets"
-    )
-    tabarena_run = mo.ui.run_button(label="Fetch & embed TabArena")
-    mo.hstack([tabarena_select, tabarena_run], justify="start")
-    return tabarena_run, tabarena_select
-
-
-@app.cell
 def _(np, stats, torch):
     import openml
 
@@ -388,7 +361,6 @@ def _(
     PCA,
     capture_col_M,
     col_embedder,
-    color_dropdown,
     device,
     load_tabarena_columns,
     mo,
@@ -404,13 +376,68 @@ def _(
         ta_M = capture_col_M(col_embedder, ta_columns, device)
         ta_coords = PCA(n_components=2, random_state=42).fit_transform(ta_M)
 
-    if color_dropdown.value == "skewness":
-        ta_fig = scatter_figure(ta_coords, ta_skew, "skewness", -1.5, 1.5)
-    else:
-        ta_fig = scatter_figure(ta_coords, ta_kurt, "kurtosis", 0.0, 5.0)
-    ta_fig.update_layout(title=f"TabArena real columns ({len(ta_M)}) — colored by {color_dropdown.value}")
-    ta_fig
+    ta_fig_skew = scatter_figure(ta_coords, ta_skew, "skewness", -1.5, 1.5)
+    ta_fig_kurt = scatter_figure(ta_coords, ta_kurt, "kurtosis", 0.0, 5.0)
+    ta_fig_skew.update_layout(title=f"TabArena real columns ({len(ta_M)}) — skewness")
+    ta_fig_kurt.update_layout(title=f"TabArena real columns ({len(ta_M)}) — kurtosis")
+    mo.hstack([ta_fig_skew, ta_fig_kurt], widths="equal", gap=1)
+
     return
+
+
+@app.cell
+def _(mo):
+    # TabArena-v0.1 classification datasets (OpenML task ids); label shows total feature count.
+    tabarena_tasks = {
+        "Bioresponse (1776f)": 363620,
+        "hiva_agnostic (1617f)": 363677,
+        "kddcup09_appetency (212f)": 363683,
+        "APSFailure (170f)": 363616,
+        "MIC (111f)": 363711,
+        "taiwanese_bankruptcy_prediction (94f)": 363706,
+        "NATICUSdroid (86f)": 363689,
+        "coil2000_insurance_policies (85f)": 363624,
+        "polish_companies_bankruptcy (64f)": 363694,
+        "splice (60f)": 363702,
+        "Diabetes130US (47f)": 363630,
+        "qsar-biodeg (41f)": 363696,
+        "anneal (38f)": 363614,
+        "students_dropout_and_academic_success (36f)": 363704,
+        "hazelnut-spread-contaminant-detection (30f)": 363674,
+        "Marketing_Campaign (25f)": 363684,
+        "in_vehicle_coupon_recommendation (24f)": 363681,
+        "credit_card_clients_default (23f)": 363627,
+        "heloc (23f)": 363676,
+        "jm1 (21f)": 363712,
+        "customer_satisfaction_in_airline (21f)": 363628,
+        "credit-g (20f)": 363626,
+        "churn (19f)": 363623,
+        "online_shoppers_intention (17f)": 363691,
+        "seismic-bumps (15f)": 363700,
+        "Is-this-a-good-customer (13f)": 363682,
+        "bank-marketing (13f)": 363618,
+        "HR_Analytics_Job_Change_of_Data_Scientists (12f)": 363679,
+        "SDSS17 (11f)": 363699,
+        "GiveMeSomeCredit (10f)": 363673,
+        "E-CommereShippingData (10f)": 363632,
+        "Bank_Customer_Churn (10f)": 363619,
+        "website_phishing (9f)": 363707,
+        "Amazon_employee_access (9f)": 363613,
+        "diabetes (8f)": 363629,
+        "maternal_health_risk (6f)": 363685,
+        "Fitness_Club (6f)": 363671,
+        "blood-transfusion-service-center (4f)": 363621,
+    }
+    tabarena_select = mo.ui.multiselect(
+        options=tabarena_tasks,
+        # default to a feature-rich mix so the scatter is dense (Bioresponse alone ~1776 cols)
+        value=["Bioresponse (1776f)", "APSFailure (170f)", "credit-g (20f)", "churn (19f)"],
+        label="TabArena datasets",
+    )
+    tabarena_run = mo.ui.run_button(label="Fetch & embed TabArena")
+    mo.hstack([tabarena_select, tabarena_run], justify="start")
+
+    return tabarena_run, tabarena_select
 
 
 if __name__ == "__main__":
