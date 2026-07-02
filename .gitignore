@@ -131,3 +131,6 @@ dmypy.json
 # Developer environments
 .idea
 .vscode
+# marimo session/cache artifacts
+notebooks/__marimo__/
+__marimo__/

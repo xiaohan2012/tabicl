@@ -40,6 +40,16 @@ dependencies = [
     "huggingface-hub",
 ]
 
+[project.optional-dependencies]
+# Interactive notebooks for exploring / reproducing paper figures
+notebook = [
+    "marimo",
+    "matplotlib",
+    "seaborn",
+    "plotly",
+    "openml",
+]
+
 [build-system]
 requires = ["hatchling>=1.26.1"]  # https://github.com/pypa/hatch/issues/1818
 build-backend = "hatchling.build"
