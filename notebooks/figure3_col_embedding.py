@@ -50,6 +50,8 @@ def _():
     os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
     os.environ.setdefault("OMP_NUM_THREADS", "1")
 
+    import platform
+
     import numpy as np
     import torch
     from scipy import stats
@@ -57,7 +59,7 @@ def _():
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
 
-    return PCA, go, make_subplots, np, stats, torch
+    return PCA, go, make_subplots, np, platform, stats, torch
 
 
 @app.cell
@@ -121,15 +123,20 @@ def _(mo, torch):
 
 
 @app.cell
-def _(mo, np, stats, torch):
+def _(mo, np, platform, stats, torch):
     from tabicl.prior.dataset import PriorDataset
+
+    # Parallel generation everywhere except macOS, where process-based joblib
+    # (n_jobs=-1) segfaults once torch is loaded. On Linux (e.g. the GPU server)
+    # this uses all cores and is far faster.
+    gen_n_jobs = 1 if platform.system() == "Darwin" else -1
 
     def generate_synthetic_columns(n_columns, seq_len, seed):
         """Pool raw columns from the SCM prior (mix_scm) until we have n_columns."""
         np.random.seed(seed)
         torch.manual_seed(seed)
         prior = PriorDataset(
-            batch_size=16,
+            batch_size=32,
             batch_size_per_gp=4,
             min_features=2,
             max_features=100,
@@ -137,7 +144,7 @@ def _(mo, np, stats, torch):
             min_seq_len=None,
             max_seq_len=seq_len,
             prior_type="mix_scm",
-            n_jobs=1,  # process-based joblib (n_jobs=-1) segfaults on macOS once torch is loaded
+            n_jobs=gen_n_jobs,
             device="cpu",
         )
         cols, skew, kurt = [], [], []
